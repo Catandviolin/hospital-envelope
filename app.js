@@ -1,15 +1,8 @@
 (() => {
   "use strict";
 
-  // Public Nominatim policy:
-  // - no more than 1 request/second
-  // - valid Referer or User-Agent
-  // - attribution
-  // - cache repeated queries
-  // This app uses the browser's Referer, waits >= 1.1 sec between searches,
-  // and caches results in localStorage.
   const NOMINATIM = "https://nominatim.openstreetmap.org/search";
-  const CACHE_KEY = "hospital-envelope-search-cache-v1";
+  const CACHE_KEY = "hospital-envelope-search-cache-v2";
   const SETTINGS_KEY = "hospital-envelope-settings-v1";
 
   const $ = (id) => document.getElementById(id);
@@ -44,17 +37,13 @@
   let activeController = null;
 
   function loadJSON(key, fallback) {
-    try {
-      return JSON.parse(localStorage.getItem(key)) ?? fallback;
-    } catch {
-      return fallback;
-    }
+    try { return JSON.parse(localStorage.getItem(key)) ?? fallback; }
+    catch { return fallback; }
   }
 
   function saveJSON(key, value) {
-    try {
-      localStorage.setItem(key, JSON.stringify(value));
-    } catch {}
+    try { localStorage.setItem(key, JSON.stringify(value)); }
+    catch {}
   }
 
   function normalizePostal(value = "") {
@@ -64,22 +53,35 @@
   }
 
   function pickName(item) {
+    if (item.namedetails?.name) return item.namedetails.name;
     if (item.name) return item.name;
-    const first = (item.display_name || "").split(",")[0].trim();
-    return first || "名称不明";
+    return (item.display_name || "").split(",")[0].trim() || "名称不明";
   }
 
-  function makeJapaneseAddress(a = {}) {
-    // Nominatim fields vary by region/object.
-    // Use Japanese administrative order and remove duplicates.
-    const parts = [
-      a.province || a.state,
-      a.city || a.town || a.village || a.municipality,
-      a.city_district || a.borough,
-      a.suburb || a.quarter || a.neighbourhood,
-      a.road,
-      a.house_number
-    ].filter(Boolean);
+  function cleanPart(value) {
+    return String(value || "")
+      .replace(/^日本$/u, "")
+      .replace(/^Japan$/i, "")
+      .replace(/^〒?\s*\d{3}-?\d{4}$/u, "")
+      .trim();
+  }
+
+  // First try structured fields. This includes Japanese ward/county/town variants.
+  function structuredJapaneseAddress(a = {}) {
+    const prefecture = a.province || a.state || "";
+    const city = a.city || a.municipality || "";
+    const ward = a.city_district || a.borough || "";
+    const county = a.county || "";
+    const town = a.town || a.village || "";
+    const locality =
+      a.suburb || a.quarter || a.neighbourhood || a.hamlet || a.residential || "";
+    const road = a.road || a.pedestrian || a.place || "";
+    const house = a.house_number || "";
+
+    // Avoid repeating city/county where OSM gives overlapping labels.
+    const parts = [prefecture, city, ward, county, town, locality, road, house]
+      .map(cleanPart)
+      .filter(Boolean);
 
     const unique = [];
     for (const p of parts) {
@@ -88,11 +90,70 @@
     return unique.join("");
   }
 
+  // Nominatim display_name in Japan is often:
+  // POI, small locality, ward, city, prefecture, postcode, Japan
+  // Convert that to Japanese postal order:
+  // prefecture + city + ward + locality
+  function addressFromDisplayName(item, hospitalName) {
+    const raw = String(item.display_name || "");
+    if (!raw) return "";
+
+    let parts = raw.split(",").map(s => s.trim()).filter(Boolean);
+
+    parts = parts.filter(p => {
+      const cleaned = cleanPart(p);
+      if (!cleaned) return false;
+      if (p === hospitalName) return false;
+      if (normalizePostal(p).replace(/\D/g, "").length === 7 &&
+          /^\s*〒?\d{3}-?\d{4}\s*$/.test(p)) return false;
+      return true;
+    });
+
+    // Remove obvious facility/POI duplicate at the beginning.
+    if (parts.length && hospitalName && parts[0].includes(hospitalName)) {
+      parts.shift();
+    }
+
+    // If broad-to-specific already starts with a prefecture, keep order.
+    const prefIndex = parts.findIndex(p => /(?:都|道|府|県)$/.test(p));
+    if (prefIndex === 0) {
+      return parts.join("");
+    }
+
+    // If prefecture appears later, Nominatim is likely specific-to-broad.
+    if (prefIndex > 0) {
+      const broad = parts.slice(0, prefIndex + 1).reverse();
+      const tail = parts.slice(prefIndex + 1);
+      return [...broad, ...tail].join("");
+    }
+
+    // Fallback: reverse broad/local hierarchy.
+    return parts.reverse().join("");
+  }
+
+  function bestJapaneseAddress(item) {
+    const name = pickName(item);
+    const structured = structuredJapaneseAddress(item.address || {});
+    const fromDisplay = addressFromDisplayName(item, name);
+
+    // Prefer display-derived form when it contains more useful Japanese detail.
+    // Structured fields are retained if they are clearly longer/more complete.
+    if (!structured) return fromDisplay;
+    if (!fromDisplay) return structured;
+
+    const important = s =>
+      ["都","道","府","県","市","区","町","村"]
+        .reduce((n, c) => n + (s.includes(c) ? 1 : 0), 0);
+
+    if (important(fromDisplay) > important(structured)) return fromDisplay;
+    if (fromDisplay.length > structured.length + 4) return fromDisplay;
+    return structured;
+  }
+
   function cacheGet(query) {
     const cache = loadJSON(CACHE_KEY, {});
     const entry = cache[query];
     if (!entry) return null;
-    // 30-day cache
     if (Date.now() - entry.time > 30 * 24 * 60 * 60 * 1000) return null;
     return entry.data;
   }
@@ -100,7 +161,6 @@
   function cacheSet(query, data) {
     const cache = loadJSON(CACHE_KEY, {});
     cache[query] = { time: Date.now(), data };
-    // Keep at most 50 distinct searches
     const keys = Object.keys(cache).sort((a,b) => cache[b].time - cache[a].time);
     for (const k of keys.slice(50)) delete cache[k];
     saveJSON(CACHE_KEY, cache);
@@ -143,7 +203,7 @@
         namedetails: "1",
         "accept-language": "ja",
         countrycodes: "jp",
-        limit: "8"
+        limit: "10"
       });
 
       lastRequestAt = Date.now();
@@ -171,6 +231,7 @@
 
   function renderResults(data, fromCache) {
     el.results.innerHTML = "";
+
     if (!Array.isArray(data) || data.length === 0) {
       el.status.textContent =
         "候補が見つかりませんでした。病院名を短くするか、住所・病院名を手入力してください。";
@@ -187,22 +248,27 @@
 
       const name = pickName(item);
       const postal = normalizePostal(item.address?.postcode || "");
-      const address = makeJapaneseAddress(item.address || {});
-      const fallback = (item.display_name || "").replace(/,\s*/g, " ");
+      const address = bestJapaneseAddress(item);
 
       const strong = document.createElement("strong");
       strong.textContent = name;
+
       const span = document.createElement("span");
-      span.textContent = `${postal ? "〒" + postal + " " : ""}${address || fallback}`;
+      span.textContent = `${postal ? "〒" + postal + " " : ""}${address || item.display_name || ""}`;
 
       btn.append(strong, span);
+
       btn.addEventListener("click", () => {
         el.postal.value = postal;
-        el.address.value = address || fallback;
+        el.address.value = address || "";
         el.hospital.value = name;
         updatePreview();
-        el.status.textContent = `「${name}」を選択しました。住所を確認してください。`;
-        window.scrollTo({ top: el.postal.getBoundingClientRect().top + window.scrollY - 20, behavior: "smooth" });
+        el.status.textContent =
+          `「${name}」を選択しました。住所はOpenStreetMap由来です。印刷前に確認してください。`;
+        window.scrollTo({
+          top: el.postal.getBoundingClientRect().top + window.scrollY - 20,
+          behavior: "smooth"
+        });
       });
 
       el.results.appendChild(btn);
@@ -232,7 +298,7 @@
       el.previewRecipient.textContent = dept ? `${dept} 御中` : "御中";
       el.previewDepartment.textContent = "";
     } else {
-      el.previewRecipient.textContent = hospital ? "御中" : "御中";
+      el.previewRecipient.textContent = "御中";
     }
 
     const x = Number(el.offsetX.value);
