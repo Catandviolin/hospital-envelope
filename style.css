@@ -219,30 +219,71 @@ footer {
   }
 
   html, body {
-    width: 235mm;
-    height: 120mm;
     margin: 0 !important;
     padding: 0 !important;
+    width: 235mm !important;
+    height: 120mm !important;
+    min-width: 235mm !important;
+    min-height: 120mm !important;
+    overflow: hidden !important;
     background: white !important;
   }
 
-  body * {
-    visibility: hidden !important;
+  /* 画面用UIを印刷レイアウトから完全に除外 */
+  body > .app {
+    display: block !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 235mm !important;
+    height: 120mm !important;
   }
 
-  #envelope, #envelope * {
-    visibility: visible !important;
+  .app > header,
+  .app > .card:not(.controls-card),
+  .controls-card > h2,
+  .controls-card > .adjust-grid,
+  .controls-card > .hint,
+  .controls-card > .action-row,
+  .controls-card > .print-note,
+  footer {
+    display: none !important;
+  }
+
+  .controls-card {
+    display: block !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    box-shadow: none !important;
+    width: 235mm !important;
+    height: 120mm !important;
+  }
+
+  .preview-wrap {
+    display: block !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: hidden !important;
+    width: 235mm !important;
+    height: 120mm !important;
   }
 
   #envelope {
-    position: fixed !important;
+    display: block !important;
+    position: relative !important;
     left: 0 !important;
     top: 0 !important;
     width: 235mm !important;
     height: 120mm !important;
+    margin: 0 !important;
+    padding: 0 !important;
     border: 0 !important;
     box-shadow: none !important;
     transform: none !important;
-    margin: 0 !important;
+    overflow: hidden !important;
+    page-break-before: avoid !important;
+    page-break-after: avoid !important;
+    break-before: avoid-page !important;
+    break-after: avoid-page !important;
   }
 }
