@@ -1,583 +1,359 @@
-(() => {
-  "use strict";
+const $ = (id) => document.getElementById(id);
 
-  const NOMINATIM = "https://nominatim.openstreetmap.org/search";
-  const CACHE_KEY = "hospital-envelope-search-cache-v2";
-  const SETTINGS_KEY = "hospital-envelope-settings-v1";
+const KEYS = {
+  hospitals: "referral_app_custom_hospitals_v1",
+  sender: "referral_app_sender_v1"
+};
 
-  const $ = (id) => document.getElementById(id);
-
-  const el = {
-    query: $("hospitalQuery"),
-    searchBtn: $("searchBtn"),
-    status: $("status"),
-    results: $("results"),
-    postal: $("postal"),
-    address: $("address"),
-    hospital: $("hospitalName"),
-    department: $("department"),
-    doctor: $("doctor"),
-    offsetX: $("offsetX"),
-    offsetY: $("offsetY"),
-    fontSize: $("fontSize"),
-    offsetXValue: $("offsetXValue"),
-    offsetYValue: $("offsetYValue"),
-    fontSizeValue: $("fontSizeValue"),
-    printContent: $("printContent"),
-    previewPostal: $("previewPostal"),
-    previewAddress: $("previewAddress"),
-    previewHospital: $("previewHospital"),
-    previewDepartment: $("previewDepartment"),
-    previewRecipient: $("previewRecipient"),
-    printBtn: $("printBtn"),
-    clearBtn: $("clearBtn"),
-  };
-
-  let lastRequestAt = 0;
-  let activeController = null;
-
-  function loadJSON(key, fallback) {
-    try { return JSON.parse(localStorage.getItem(key)) ?? fallback; }
-    catch { return fallback; }
+function loadCustomHospitals() {
+  try {
+    return JSON.parse(localStorage.getItem(KEYS.hospitals) || "[]");
+  } catch {
+    return [];
   }
+}
 
-  function saveJSON(key, value) {
-    try { localStorage.setItem(key, JSON.stringify(value)); }
-    catch {}
-  }
+function saveCustomHospitals(items) {
+  localStorage.setItem(KEYS.hospitals, JSON.stringify(items));
+}
 
-  function normalizePostal(value = "") {
-    const digits = String(value).replace(/\D/g, "");
-    if (digits.length === 7) return `${digits.slice(0,3)}-${digits.slice(3)}`;
-    return String(value).replace(/^〒\s*/, "").trim();
-  }
-
-  function pickName(item) {
-    if (item.namedetails?.name) return item.namedetails.name;
-    if (item.name) return item.name;
-    return (item.display_name || "").split(",")[0].trim() || "名称不明";
-  }
-
-  function cleanPart(value) {
-    return String(value || "")
-      .replace(/^日本$/u, "")
-      .replace(/^Japan$/i, "")
-      .replace(/^〒?\s*\d{3}-?\d{4}$/u, "")
-      .trim();
-  }
-
-  // First try structured fields. This includes Japanese ward/county/town variants.
-  function structuredJapaneseAddress(a = {}) {
-    const prefecture = a.province || a.state || "";
-    const city = a.city || a.municipality || "";
-    const ward = a.city_district || a.borough || "";
-    const county = a.county || "";
-    const town = a.town || a.village || "";
-    const locality =
-      a.suburb || a.quarter || a.neighbourhood || a.hamlet || a.residential || "";
-    const road = a.road || a.pedestrian || a.place || "";
-    const house = a.house_number || "";
-
-    // Avoid repeating city/county where OSM gives overlapping labels.
-    const parts = [prefecture, city, ward, county, town, locality, road, house]
-      .map(cleanPart)
-      .filter(Boolean);
-
-    const unique = [];
-    for (const p of parts) {
-      if (!unique.includes(p)) unique.push(p);
-    }
-    return unique.join("");
-  }
-
-  // Nominatim display_name in Japan is often:
-  // POI, small locality, ward, city, prefecture, postcode, Japan
-  // Convert that to Japanese postal order:
-  // prefecture + city + ward + locality
-  function addressFromDisplayName(item, hospitalName) {
-    const raw = String(item.display_name || "");
-    if (!raw) return "";
-
-    let parts = raw.split(",").map(s => s.trim()).filter(Boolean);
-
-    parts = parts.filter(p => {
-      const cleaned = cleanPart(p);
-      if (!cleaned) return false;
-      if (p === hospitalName) return false;
-      if (normalizePostal(p).replace(/\D/g, "").length === 7 &&
-          /^\s*〒?\d{3}-?\d{4}\s*$/.test(p)) return false;
-      return true;
-    });
-
-    // Remove obvious facility/POI duplicate at the beginning.
-    if (parts.length && hospitalName && parts[0].includes(hospitalName)) {
-      parts.shift();
-    }
-
-    // If broad-to-specific already starts with a prefecture, keep order.
-    const prefIndex = parts.findIndex(p => /(?:都|道|府|県)$/.test(p));
-    if (prefIndex === 0) {
-      return parts.join("");
-    }
-
-    // If prefecture appears later, Nominatim is likely specific-to-broad.
-    if (prefIndex > 0) {
-      const broad = parts.slice(0, prefIndex + 1).reverse();
-      const tail = parts.slice(prefIndex + 1);
-      return [...broad, ...tail].join("");
-    }
-
-    // Fallback: reverse broad/local hierarchy.
-    return parts.reverse().join("");
-  }
-
-  function bestJapaneseAddress(item) {
-    const name = pickName(item);
-    const structured = structuredJapaneseAddress(item.address || {});
-    const fromDisplay = addressFromDisplayName(item, name);
-
-    // Prefer display-derived form when it contains more useful Japanese detail.
-    // Structured fields are retained if they are clearly longer/more complete.
-    if (!structured) return fromDisplay;
-    if (!fromDisplay) return structured;
-
-    const important = s =>
-      ["都","道","府","県","市","区","町","村"]
-        .reduce((n, c) => n + (s.includes(c) ? 1 : 0), 0);
-
-    if (important(fromDisplay) > important(structured)) return fromDisplay;
-    if (fromDisplay.length > structured.length + 4) return fromDisplay;
-    return structured;
-  }
-
-  function cacheGet(query) {
-    const cache = loadJSON(CACHE_KEY, {});
-    const entry = cache[query];
-    if (!entry) return null;
-    if (Date.now() - entry.time > 30 * 24 * 60 * 60 * 1000) return null;
-    return entry.data;
-  }
-
-  function cacheSet(query, data) {
-    const cache = loadJSON(CACHE_KEY, {});
-    cache[query] = { time: Date.now(), data };
-    const keys = Object.keys(cache).sort((a,b) => cache[b].time - cache[a].time);
-    for (const k of keys.slice(50)) delete cache[k];
-    saveJSON(CACHE_KEY, cache);
-  }
-
-  async function waitForRateLimit() {
-    const elapsed = Date.now() - lastRequestAt;
-    const wait = Math.max(0, 1100 - elapsed);
-    if (wait) await new Promise(r => setTimeout(r, wait));
-  }
-
-  async function searchHospitals() {
-    const query = el.query.value.trim();
-    if (query.length < 2) {
-      el.status.textContent = "病院名を2文字以上入力してください。";
-      return;
-    }
-
-    const normalized = query.toLowerCase();
-    const cached = cacheGet(normalized);
-    if (cached) {
-      renderResults(cached, true);
-      return;
-    }
-
-    if (activeController) activeController.abort();
-    activeController = new AbortController();
-
-    el.searchBtn.disabled = true;
-    el.status.textContent = "検索中…";
-    el.results.innerHTML = "";
-
-    try {
-      await waitForRateLimit();
-
-      const params = new URLSearchParams({
-        q: query,
-        format: "jsonv2",
-        addressdetails: "1",
-        namedetails: "1",
-        "accept-language": "ja",
-        countrycodes: "jp",
-        limit: "10"
-      });
-
-      lastRequestAt = Date.now();
-      const response = await fetch(`${NOMINATIM}?${params.toString()}`, {
-        method: "GET",
-        mode: "cors",
-        signal: activeController.signal,
-        headers: { "Accept": "application/json" }
-      });
-
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const data = await response.json();
-
-      cacheSet(normalized, data);
-      renderResults(data, false);
-    } catch (err) {
-      if (err.name === "AbortError") return;
-      el.status.textContent =
-        "検索できませんでした。通信状態を確認するか、住所・病院名を手入力してください。";
-    } finally {
-      el.searchBtn.disabled = false;
-      activeController = null;
-    }
-  }
-
-  function renderResults(data, fromCache) {
-    el.results.innerHTML = "";
-
-    if (!Array.isArray(data) || data.length === 0) {
-      el.status.textContent =
-        "候補が見つかりませんでした。病院名を短くするか、住所・病院名を手入力してください。";
-      return;
-    }
-
-    el.status.textContent = `${data.length}件の候補${fromCache ? "（保存済み検索結果）" : ""}`;
-
-    data.forEach((item) => {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "result";
-      btn.setAttribute("role", "listitem");
-
-      const name = pickName(item);
-      const postal = normalizePostal(item.address?.postcode || "");
-      const address = bestJapaneseAddress(item);
-
-      const strong = document.createElement("strong");
-      strong.textContent = name;
-
-      const span = document.createElement("span");
-      span.textContent = `${postal ? "〒" + postal + " " : ""}${address || item.display_name || ""}`;
-
-      btn.append(strong, span);
-
-      btn.addEventListener("click", () => {
-        el.postal.value = postal;
-        el.address.value = address || "";
-        el.hospital.value = name;
-        updatePreview();
-        el.status.textContent =
-          `「${name}」を選択しました。住所はOpenStreetMap由来です。印刷前に確認してください。`;
-        window.scrollTo({
-          top: el.postal.getBoundingClientRect().top + window.scrollY - 20,
-          behavior: "smooth"
-        });
-      });
-
-      el.results.appendChild(btn);
-    });
-  }
-
-  function getRecipientType() {
-    return document.querySelector('input[name="recipientType"]:checked')?.value || "doctor";
-  }
-
-  function updatePreview() {
-    const postal = normalizePostal(el.postal.value);
-    const address = el.address.value.trim();
-    const hospital = el.hospital.value.trim();
-    const dept = el.department.value.trim();
-    const doctor = el.doctor.value.trim();
-    const type = getRecipientType();
-
-    el.previewPostal.textContent = postal ? `〒${postal}` : "";
-    el.previewAddress.textContent = address;
-    el.previewHospital.textContent = hospital;
-    el.previewDepartment.textContent = type === "hospital" ? "" : dept;
-
-    if (type === "doctor") {
-      el.previewRecipient.textContent = doctor ? `${doctor} 先生　御机下` : "先生　御机下";
-    } else if (type === "department") {
-      el.previewRecipient.textContent = dept ? `${dept} 御中` : "御中";
-      el.previewDepartment.textContent = "";
-    } else {
-      el.previewRecipient.textContent = "御中";
-    }
-
-    const x = Number(el.offsetX.value);
-    const y = Number(el.offsetY.value);
-    const fs = Number(el.fontSize.value);
-
-    el.printContent.style.transform = `translate(${x}mm, ${y}mm)`;
-    el.printContent.style.fontSize = `${fs}pt`;
-
-    el.offsetXValue.textContent = `${x} mm`;
-    el.offsetYValue.textContent = `${y} mm`;
-    el.fontSizeValue.textContent = `${fs} pt`;
-
-    saveJSON(SETTINGS_KEY, { x, y, fs, type });
-  }
-
-  function restoreSettings() {
-    const s = loadJSON(SETTINGS_KEY, {});
-    if (Number.isFinite(s.x)) el.offsetX.value = s.x;
-    if (Number.isFinite(s.y)) el.offsetY.value = s.y;
-    if (Number.isFinite(s.fs)) el.fontSize.value = s.fs;
-    if (s.type) {
-      const radio = document.querySelector(`input[name="recipientType"][value="${s.type}"]`);
-      if (radio) radio.checked = true;
-    }
-  }
-
-  function clearInputs() {
-    if (!confirm("入力内容をクリアしますか？")) return;
-    [el.query, el.postal, el.address, el.hospital, el.department, el.doctor]
-      .forEach(x => x.value = "");
-    el.results.innerHTML = "";
-    el.status.textContent = "";
-    updatePreview();
-  }
-
-  function validateBeforePrint() {
-    if (!el.hospital.value.trim()) {
-      alert("病院名を入力してください。");
-      el.hospital.focus();
-      return false;
-    }
-    if (!el.address.value.trim()) {
-      alert("住所を入力してください。");
-      el.address.focus();
-      return false;
-    }
-    if (getRecipientType() === "doctor" && !el.doctor.value.trim()) {
-      const ok = confirm("医師名が空欄です。このまま「先生 御机下」で印刷しますか？");
-      if (!ok) {
-        el.doctor.focus();
-        return false;
-      }
-    }
+function allHospitals() {
+  const custom = loadCustomHospitals();
+  const defaults = Array.isArray(window.DEFAULT_HOSPITALS) ? window.DEFAULT_HOSPITALS : [];
+  const merged = [...custom, ...defaults];
+  const seen = new Set();
+  return merged.filter(h => {
+    const key = `${h.name}|${h.address}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
     return true;
-  }
-
-  el.searchBtn.addEventListener("click", searchHospitals);
-  el.query.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      searchHospitals();
-    }
   });
+}
 
-  [el.postal, el.address, el.hospital, el.department, el.doctor,
-   el.offsetX, el.offsetY, el.fontSize]
-    .forEach(node => node.addEventListener("input", updatePreview));
+function normalize(s) {
+  return (s || "").toLowerCase().replace(/\s+/g, "");
+}
 
-  document.querySelectorAll('input[name="recipientType"]')
-    .forEach(node => node.addEventListener("change", updatePreview));
+function renderSearchResults(query) {
+  const box = $("searchResults");
+  box.innerHTML = "";
+  const q = normalize(query);
+  if (!q) return;
 
+  const results = allHospitals()
+    .filter(h => normalize(h.name).includes(q) || normalize(h.address).includes(q))
+    .slice(0, 12);
 
-  function mmToPt(mm) {
-    return mm * 72 / 25.4;
+  if (!results.length) {
+    box.innerHTML = '<div class="hint">登録済み病院に見つかりません。「Googleで検索」後、未登録病院として追加してください。</div>';
+    return;
   }
 
-  function base64ToBytes(base64) {
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    return bytes;
-  }
-
-  function asciiBytes(str) {
-    return new TextEncoder().encode(str);
-  }
-
-  function concatBytes(parts) {
-    const total = parts.reduce((n, p) => n + p.length, 0);
-    const out = new Uint8Array(total);
-    let offset = 0;
-    for (const p of parts) {
-      out.set(p, offset);
-      offset += p.length;
-    }
-    return out;
-  }
-
-  function makeSinglePagePdfFromJpeg(jpegBytes, imageWidthPx, imageHeightPx) {
-    // Long No.3 envelope: 235 x 120 mm landscape
-    const pageW = mmToPt(235);
-    const pageH = mmToPt(120);
-
-    const content = `q\n${pageW.toFixed(3)} 0 0 ${pageH.toFixed(3)} 0 0 cm\n/Im0 Do\nQ\n`;
-    const contentBytes = asciiBytes(content);
-
-    const objects = [];
-
-    objects[1] = asciiBytes(
-      `1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n`
-    );
-    objects[2] = asciiBytes(
-      `2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n`
-    );
-    objects[3] = asciiBytes(
-      `3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageW.toFixed(3)} ${pageH.toFixed(3)}] ` +
-      `/Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>\nendobj\n`
-    );
-    objects[4] = concatBytes([
-      asciiBytes(`4 0 obj\n<< /Length ${contentBytes.length} >>\nstream\n`),
-      contentBytes,
-      asciiBytes(`endstream\nendobj\n`)
-    ]);
-    objects[5] = concatBytes([
-      asciiBytes(
-        `5 0 obj\n<< /Type /XObject /Subtype /Image /Width ${imageWidthPx} /Height ${imageHeightPx} ` +
-        `/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpegBytes.length} >>\nstream\n`
-      ),
-      jpegBytes,
-      asciiBytes(`\nendstream\nendobj\n`)
-    ]);
-
-    const header = asciiBytes("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
-    const parts = [header];
-    const offsets = [0];
-    let cursor = header.length;
-
-    for (let i = 1; i <= 5; i++) {
-      offsets[i] = cursor;
-      parts.push(objects[i]);
-      cursor += objects[i].length;
-    }
-
-    const xrefOffset = cursor;
-    let xref = "xref\n0 6\n";
-    xref += "0000000000 65535 f \n";
-    for (let i = 1; i <= 5; i++) {
-      xref += String(offsets[i]).padStart(10, "0") + " 00000 n \n";
-    }
-    xref +=
-      `trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
-
-    parts.push(asciiBytes(xref));
-    return concatBytes(parts);
-  }
-
-  function wrapCanvasText(ctx, text, maxWidth) {
-    if (!text) return [];
-    // Japanese can wrap at essentially any character. Keep ASCII runs together when possible.
-    const chars = Array.from(text);
-    const lines = [];
-    let line = "";
-
-    for (const ch of chars) {
-      const test = line + ch;
-      if (line && ctx.measureText(test).width > maxWidth) {
-        lines.push(line);
-        line = ch;
-      } else {
-        line = test;
-      }
-    }
-    if (line) lines.push(line);
-    return lines;
-  }
-
-  function drawEnvelopeCanvas() {
-    // 300 dpi gives clean envelope printing while remaining manageable on iPad.
-    const dpi = 300;
-    const pxPerMm = dpi / 25.4;
-    const W = Math.round(235 * pxPerMm);
-    const H = Math.round(120 * pxPerMm);
-
-    const canvas = document.createElement("canvas");
-    canvas.width = W;
-    canvas.height = H;
-    const ctx = canvas.getContext("2d", { alpha: false });
-
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, W, H);
-    ctx.fillStyle = "#111111";
-    ctx.textBaseline = "top";
-
-    const xOffset = Number(el.offsetX.value);
-    const yOffset = Number(el.offsetY.value);
-    const fsPt = Number(el.fontSize.value);
-
-    // Match the on-screen envelope coordinates.
-    const baseXmm = 92 + xOffset;
-    const baseYmm = 28 + yOffset;
-    const maxWmm = 130;
-
-    const baseX = baseXmm * pxPerMm;
-    let y = baseYmm * pxPerMm;
-    const maxW = maxWmm * pxPerMm;
-
-    const fontFamily = '"Hiragino Sans","Yu Gothic","Noto Sans JP",sans-serif';
-
-    function setFont(pt, weight = 400) {
-      // CSS pt = 1/72 inch
-      const px = pt * dpi / 72;
-      ctx.font = `${weight} ${px}px ${fontFamily}`;
-      return px;
-    }
-
-    function drawLines(text, pt, weight, lineHeightFactor, afterMm) {
-      if (!text) return;
-      const px = setFont(pt, weight);
-      const lh = px * lineHeightFactor;
-      const lines = wrapCanvasText(ctx, text, maxW);
-      for (const line of lines) {
-        ctx.fillText(line, baseX, y);
-        y += lh;
-      }
-      y += afterMm * pxPerMm;
-    }
-
-    const postal = normalizePostal(el.postal.value);
-    const address = el.address.value.trim();
-    const hospital = el.hospital.value.trim();
-    const dept = el.department.value.trim();
-    const doctor = el.doctor.value.trim();
-    const type = getRecipientType();
-
-    drawLines(postal ? `〒${postal}` : "", fsPt * 0.82, 400, 1.35, 2);
-    drawLines(address, fsPt * 0.88, 400, 1.45, 3);
-    drawLines(hospital, fsPt, 700, 1.55, 1);
-
-    if (type === "doctor") {
-      drawLines(dept, fsPt, 400, 1.55, 1);
-      drawLines(doctor ? `${doctor} 先生　御机下` : "先生　御机下",
-                fsPt, 700, 1.55, 0);
-    } else if (type === "department") {
-      drawLines(dept ? `${dept} 御中` : "御中", fsPt, 700, 1.55, 0);
-    } else {
-      drawLines("御中", fsPt, 700, 1.55, 0);
-    }
-
-    return canvas;
-  }
-
-  function createEnvelopePdf() {
-    const canvas = drawEnvelopeCanvas();
-
-    // JPEG is used because it can be embedded into a tiny PDF without any external library.
-    const dataUrl = canvas.toDataURL("image/jpeg", 0.96);
-    const base64 = dataUrl.split(",")[1];
-    const jpegBytes = base64ToBytes(base64);
-    const pdfBytes = makeSinglePagePdfFromJpeg(jpegBytes, canvas.width, canvas.height);
-
-    const blob = new Blob([pdfBytes], { type: "application/pdf" });
-    const url = URL.createObjectURL(blob);
-
-    // Opening the PDF in the same tab is the most reliable behavior on iPad Safari.
-    // The user can then use Share -> Print, and Back returns to the app.
-    window.location.href = url;
-
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
-  }
-
-  el.printBtn.addEventListener("click", () => {
-    updatePreview();
-    if (!validateBeforePrint()) return;
-    createEnvelopePdf();
+  results.forEach(h => {
+    const btn = document.createElement("button");
+    btn.className = "search-result";
+    btn.type = "button";
+    btn.innerHTML = `<strong>${escapeHtml(h.name)}</strong><small>〒${escapeHtml(h.postalCode || "")} ${escapeHtml(h.address || "")}${h.fax ? " / FAX " + escapeHtml(h.fax) : ""}</small>`;
+    btn.addEventListener("click", () => selectHospital(h));
+    box.appendChild(btn);
   });
+}
 
-  el.clearBtn.addEventListener("click", clearInputs);
+function selectHospital(h) {
+  $("selectedHospital").value = h.name || "";
+  $("postalCode").value = h.postalCode || "";
+  $("address").value = h.address || "";
+  $("faxNumber").value = h.fax || "";
+  $("hospitalSearch").value = h.name || "";
+  $("searchResults").innerHTML = "";
+  updateAllPreviews();
+  document.querySelectorAll("input, select, textarea").forEach(el => el.blur());
+}
 
-  restoreSettings();
-  updatePreview();
-})();
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function formatRecipientLines() {
+  const hospital = $("selectedHospital").value.trim();
+  const dept = $("department").value.trim();
+  const doctor = $("doctorName").value.trim();
+  const type = $("honorific").value;
+
+  let deptLine = dept;
+  let doctorLine = "";
+
+  if (type === "desk") {
+    doctorLine = doctor ? `${doctor} 先生　御机下` : "先生　御机下";
+  } else if (type === "sama") {
+    doctorLine = doctor ? `${doctor} 先生` : "先生";
+  } else if (type === "department") {
+    deptLine = dept ? `${dept}　御中` : "御中";
+  } else if (type === "hospital") {
+    deptLine = "";
+    doctorLine = "";
+  }
+
+  return { hospital, deptLine, doctorLine, dept, doctor, type };
+}
+
+function updateEnvelopePreview() {
+  const postal = $("postalCode").value.trim();
+  const address = $("address").value.trim();
+  const r = formatRecipientLines();
+
+  $("envPostal").textContent = postal ? `〒${postal}` : "〒";
+  $("envAddress").textContent = address || "住所";
+  $("envHospital").textContent = r.hospital || "病院名";
+
+  if (r.type === "hospital") {
+    $("envHospital").textContent = r.hospital ? `${r.hospital}　御中` : "病院名　御中";
+    $("envDepartment").textContent = "";
+    $("envDoctor").textContent = "";
+  } else {
+    $("envDepartment").textContent = r.deptLine;
+    $("envDoctor").textContent = r.doctorLine;
+  }
+}
+
+function todayJapanese() {
+  const d = new Date();
+  return `${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日`;
+}
+
+function recipientForFax() {
+  const r = formatRecipientLines();
+  const lines = [];
+  if (r.type === "hospital") {
+    if (r.hospital) lines.push(`${r.hospital}　御中`);
+    return lines.join("\n");
+  }
+  if (r.hospital) lines.push(r.hospital);
+  if (r.deptLine) lines.push(r.deptLine);
+  if (r.doctorLine) lines.push(r.doctorLine);
+  return lines.join("\n");
+}
+
+function updateFaxPreview() {
+  $("faxDateCell").textContent = todayJapanese();
+  $("faxToCell").textContent = recipientForFax();
+  $("faxToNumberCell").textContent = $("faxNumber").value.trim();
+
+  $("faxFromCell").textContent = $("senderClinic").value.trim();
+  const tel = $("senderTel").value.trim();
+  const fax = $("senderFax").value.trim();
+  $("faxFromNumberCell").textContent = [tel ? `TEL ${tel}` : "", fax ? `FAX ${fax}` : ""].filter(Boolean).join(" / ");
+
+  $("faxSenderCell").textContent = $("senderName").value.trim();
+  const pages = $("faxPages").value.trim();
+  $("faxPagesCell").textContent = pages ? `本状を含め ${pages} 枚` : "";
+  $("faxSubjectCell").textContent = $("faxSubject").value.trim();
+  $("faxMessageCell").textContent = $("faxMessage").value;
+}
+
+function updateAllPreviews() {
+  updateEnvelopePreview();
+  updateFaxPreview();
+}
+
+function printEnvelope() {
+  const postal = $("postalCode").value.trim();
+  const address = $("address").value.trim();
+  const r = formatRecipientLines();
+
+  const hospitalText = r.type === "hospital"
+    ? `${r.hospital || "病院名"}　御中`
+    : (r.hospital || "病院名");
+
+  const html = `<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>長3封筒</title>
+<style>
+@page { size: 235mm 120mm; margin: 0; }
+html,body { margin:0; padding:0; width:235mm; height:120mm; background:#fff; }
+body {
+  font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;
+}
+.envelope { position:relative; width:235mm; height:120mm; overflow:hidden; }
+.postal { position:absolute; top:18mm; left:19mm; font-size:5.6mm; letter-spacing:.6mm; }
+.address { position:absolute; top:33mm; left:19mm; right:16mm; font-size:6mm; line-height:1.45; }
+.hospital { position:absolute; top:58mm; left:62mm; right:15mm; font-size:8mm; font-weight:700; }
+.department { position:absolute; top:75mm; left:62mm; right:15mm; font-size:7mm; }
+.doctor { position:absolute; top:91mm; left:62mm; right:15mm; font-size:8mm; font-weight:700; }
+</style>
+</head>
+<body>
+<div class="envelope">
+  <div class="postal">${escapeHtml(postal ? "〒"+postal : "")}</div>
+  <div class="address">${escapeHtml(address)}</div>
+  <div class="hospital">${escapeHtml(hospitalText)}</div>
+  <div class="department">${escapeHtml(r.type === "hospital" ? "" : r.deptLine)}</div>
+  <div class="doctor">${escapeHtml(r.type === "hospital" ? "" : r.doctorLine)}</div>
+</div>
+<script>
+window.onload = () => setTimeout(() => window.print(), 250);
+<\/script>
+</body></html>`;
+
+  const w = window.open("", "_blank");
+  if (!w) {
+    alert("ポップアップがブロックされました。Safariのポップアップブロックを一時的に解除してください。");
+    return;
+  }
+  w.document.open();
+  w.document.write(html);
+  w.document.close();
+}
+
+function printFax() {
+  const html = `<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FAX送付状</title>
+<style>
+@page { size:A4; margin:15mm; }
+body { font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif; color:#111; }
+h1 { text-align:center; font-size:22pt; margin:0 0 12mm; }
+table { width:100%; border-collapse:collapse; font-size:11.5pt; }
+th,td { border:1px solid #333; padding:3mm; vertical-align:top; }
+th { width:31mm; background:#f2f2f2; text-align:left; }
+.message { margin-top:10mm; white-space:pre-wrap; font-size:12pt; line-height:1.8; }
+.note { margin-top:12mm; font-size:9pt; color:#444; }
+</style>
+</head>
+<body>
+<h1>FAX送付状</h1>
+<table>
+<tr><th>送信日</th><td>${escapeHtml(todayJapanese())}</td></tr>
+<tr><th>送信先</th><td style="white-space:pre-wrap">${escapeHtml(recipientForFax())}</td></tr>
+<tr><th>FAX</th><td>${escapeHtml($("faxNumber").value.trim())}</td></tr>
+<tr><th>送信元</th><td>${escapeHtml($("senderClinic").value.trim())}</td></tr>
+<tr><th>TEL / FAX</th><td>${escapeHtml([
+  $("senderTel").value.trim() ? "TEL "+$("senderTel").value.trim() : "",
+  $("senderFax").value.trim() ? "FAX "+$("senderFax").value.trim() : ""
+].filter(Boolean).join(" / "))}</td></tr>
+<tr><th>送信者</th><td>${escapeHtml($("senderName").value.trim())}</td></tr>
+<tr><th>送信枚数</th><td>${escapeHtml($("faxPages").value.trim() ? `本状を含め ${$("faxPages").value.trim()} 枚` : "")}</td></tr>
+<tr><th>件名</th><td>${escapeHtml($("faxSubject").value.trim())}</td></tr>
+</table>
+<div class="message">${escapeHtml($("faxMessage").value)}</div>
+<div class="note">※送信先FAX番号は、送信前に必ず確認してください。</div>
+<script>
+window.onload = () => setTimeout(() => window.print(), 250);
+<\/script>
+</body></html>`;
+
+  const w = window.open("", "_blank");
+  if (!w) {
+    alert("ポップアップがブロックされました。Safariのポップアップブロックを一時的に解除してください。");
+    return;
+  }
+  w.document.open();
+  w.document.write(html);
+  w.document.close();
+}
+
+function loadSender() {
+  try {
+    const s = JSON.parse(localStorage.getItem(KEYS.sender) || "{}");
+    $("senderClinic").value = s.clinic || "";
+    $("senderTel").value = s.tel || "";
+    $("senderFax").value = s.fax || "";
+    $("senderName").value = s.name || "";
+  } catch {}
+}
+
+function saveSender() {
+  const s = {
+    clinic: $("senderClinic").value.trim(),
+    tel: $("senderTel").value.trim(),
+    fax: $("senderFax").value.trim(),
+    name: $("senderName").value.trim()
+  };
+  localStorage.setItem(KEYS.sender, JSON.stringify(s));
+  alert("送信元情報をこのiPadに保存しました。");
+}
+
+function addHospital() {
+  const name = $("newHospitalName").value.trim();
+  const postalCode = $("newPostalCode").value.trim();
+  const address = $("newAddress").value.trim();
+  const fax = $("newFax").value.trim();
+
+  if (!name || !address) {
+    alert("病院名と住所を入力してください。");
+    return;
+  }
+
+  const custom = loadCustomHospitals();
+  custom.unshift({ name, postalCode, address, fax });
+  saveCustomHospitals(custom);
+
+  selectHospital({ name, postalCode, address, fax });
+
+  $("newHospitalName").value = "";
+  $("newPostalCode").value = "";
+  $("newAddress").value = "";
+  $("newFax").value = "";
+
+  alert("病院を登録しました。次回から検索候補に表示されます。");
+}
+
+function clearRecipient() {
+  ["selectedHospital","postalCode","address","faxNumber","department","doctorName","hospitalSearch"]
+    .forEach(id => $(id).value = "");
+  $("honorific").value = "desk";
+  $("searchResults").innerHTML = "";
+  updateAllPreviews();
+}
+
+function resetApp() {
+  if (!confirm("送信元情報と現在の入力内容を初期化しますか？登録した病院は残ります。")) return;
+  localStorage.removeItem(KEYS.sender);
+  clearRecipient();
+  ["senderClinic","senderTel","senderFax","senderName"].forEach(id => $(id).value = "");
+  $("faxPages").value = "2";
+  $("faxSubject").value = "診療情報提供書送付の件";
+  $("faxMessage").value = "いつも大変お世話になっております。\n診療情報提供書を送付いたします。\nご査収のほど、よろしくお願いいたします。";
+  updateAllPreviews();
+}
+
+function googleSearch() {
+  const q = $("hospitalSearch").value.trim() || $("selectedHospital").value.trim();
+  if (!q) {
+    alert("病院名を入力してから検索してください。");
+    return;
+  }
+  const url = `https://www.google.com/search?q=${encodeURIComponent(q + " 住所 FAX")}`;
+  window.open(url, "_blank");
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  loadSender();
+  updateAllPreviews();
+
+  $("hospitalSearch").addEventListener("input", e => renderSearchResults(e.target.value));
+  $("googleSearchBtn").addEventListener("click", googleSearch);
+  $("addHospitalBtn").addEventListener("click", addHospital);
+
+  $("printEnvelopeBtn").addEventListener("click", printEnvelope);
+  $("printFaxBtn").addEventListener("click", printFax);
+  $("saveSenderBtn").addEventListener("click", saveSender);
+  $("clearRecipientBtn").addEventListener("click", clearRecipient);
+  $("resetAppBtn").addEventListener("click", resetApp);
+
+  document.querySelectorAll("input, select, textarea").forEach(el => {
+    el.addEventListener("input", updateAllPreviews);
+    el.addEventListener("change", updateAllPreviews);
+  });
+});
