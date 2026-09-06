@@ -373,7 +373,42 @@
 
   el.printBtn.addEventListener("click", () => {
     updatePreview();
-    if (validateBeforePrint()) window.print();
+    if (!validateBeforePrint()) return;
+
+    const postal = normalizePostal(el.postal.value);
+    const address = el.address.value.trim();
+    const hospital = el.hospital.value.trim();
+    const dept = el.department.value.trim();
+    const doctor = el.doctor.value.trim();
+    const type = getRecipientType();
+
+    let department = "";
+    let recipient = "";
+
+    if (type === "doctor") {
+      department = dept;
+      recipient = doctor ? `${doctor} 先生　御机下` : "先生　御机下";
+    } else if (type === "department") {
+      recipient = dept ? `${dept} 御中` : "御中";
+    } else {
+      recipient = "御中";
+    }
+
+    const printData = {
+      postal,
+      address,
+      hospital,
+      department,
+      recipient,
+      x: Number(el.offsetX.value),
+      y: Number(el.offsetY.value),
+      fs: Number(el.fontSize.value)
+    };
+
+    sessionStorage.setItem("hospitalEnvelopePrintData", JSON.stringify(printData));
+
+    // Dedicated print-only page: no form/search UI exists in this document.
+    window.location.href = "print.html";
   });
 
   el.clearBtn.addEventListener("click", clearInputs);

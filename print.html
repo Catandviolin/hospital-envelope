@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>封筒印刷</title>
+  <style>
+    @page {
+      size: 235mm 120mm;
+      margin: 0;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 235mm;
+      height: 120mm;
+      overflow: hidden;
+      background: white;
+      font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans",
+                   "Yu Gothic", "Noto Sans JP", sans-serif;
+    }
+
+    .envelope {
+      position: relative;
+      width: 235mm;
+      height: 120mm;
+      overflow: hidden;
+      background: white;
+    }
+
+    .print-content {
+      position: absolute;
+      left: 92mm;
+      top: 28mm;
+      width: 130mm;
+      line-height: 1.6;
+      white-space: normal;
+      color: #111;
+    }
+
+    .postal {
+      font-size: .82em;
+      letter-spacing: .08em;
+      margin-bottom: 2mm;
+    }
+
+    .address {
+      font-size: .88em;
+      margin-bottom: 3mm;
+    }
+
+    .hospital {
+      font-weight: 700;
+      margin-top: 1mm;
+    }
+
+    .department {
+      margin-top: 1mm;
+    }
+
+    .recipient {
+      font-weight: 700;
+      margin-top: 2mm;
+    }
+
+    .toolbar {
+      position: fixed;
+      z-index: 10;
+      left: 8px;
+      top: 8px;
+      display: flex;
+      gap: 8px;
+    }
+
+    .toolbar button {
+      font: inherit;
+      padding: 8px 12px;
+      border: 1px solid #bbb;
+      border-radius: 8px;
+      background: white;
+    }
+
+    @media print {
+      .toolbar {
+        display: none !important;
+      }
+
+      html, body, .envelope {
+        width: 235mm !important;
+        height: 120mm !important;
+        overflow: hidden !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <button type="button" onclick="window.print()">印刷</button>
+    <button type="button" onclick="window.close()">戻る</button>
+  </div>
+
+  <div class="envelope">
+    <div id="content" class="print-content">
+      <div id="postal" class="postal"></div>
+      <div id="address" class="address"></div>
+      <div id="hospital" class="hospital"></div>
+      <div id="department" class="department"></div>
+      <div id="recipient" class="recipient"></div>
+    </div>
+  </div>
+
+  <script>
+    (() => {
+      const data = JSON.parse(sessionStorage.getItem("hospitalEnvelopePrintData") || "{}");
+
+      document.getElementById("postal").textContent =
+        data.postal ? "〒" + data.postal : "";
+      document.getElementById("address").textContent = data.address || "";
+      document.getElementById("hospital").textContent = data.hospital || "";
+      document.getElementById("department").textContent = data.department || "";
+      document.getElementById("recipient").textContent = data.recipient || "";
+
+      const content = document.getElementById("content");
+      const x = Number(data.x || 0);
+      const y = Number(data.y || 0);
+      const fs = Number(data.fs || 17);
+
+      content.style.transform = `translate(${x}mm, ${y}mm)`;
+      content.style.fontSize = `${fs}pt`;
+    })();
+  </script>
+</body>
+</html>
