@@ -371,9 +371,161 @@
   document.querySelectorAll('input[name="recipientType"]')
     .forEach(node => node.addEventListener("change", updatePreview));
 
-  el.printBtn.addEventListener("click", () => {
-    updatePreview();
-    if (!validateBeforePrint()) return;
+
+  function mmToPt(mm) {
+    return mm * 72 / 25.4;
+  }
+
+  function base64ToBytes(base64) {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+
+  function asciiBytes(str) {
+    return new TextEncoder().encode(str);
+  }
+
+  function concatBytes(parts) {
+    const total = parts.reduce((n, p) => n + p.length, 0);
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (const p of parts) {
+      out.set(p, offset);
+      offset += p.length;
+    }
+    return out;
+  }
+
+  function makeSinglePagePdfFromJpeg(jpegBytes, imageWidthPx, imageHeightPx) {
+    // Long No.3 envelope: 235 x 120 mm landscape
+    const pageW = mmToPt(235);
+    const pageH = mmToPt(120);
+
+    const content = `q\n${pageW.toFixed(3)} 0 0 ${pageH.toFixed(3)} 0 0 cm\n/Im0 Do\nQ\n`;
+    const contentBytes = asciiBytes(content);
+
+    const objects = [];
+
+    objects[1] = asciiBytes(
+      `1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n`
+    );
+    objects[2] = asciiBytes(
+      `2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n`
+    );
+    objects[3] = asciiBytes(
+      `3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageW.toFixed(3)} ${pageH.toFixed(3)}] ` +
+      `/Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>\nendobj\n`
+    );
+    objects[4] = concatBytes([
+      asciiBytes(`4 0 obj\n<< /Length ${contentBytes.length} >>\nstream\n`),
+      contentBytes,
+      asciiBytes(`endstream\nendobj\n`)
+    ]);
+    objects[5] = concatBytes([
+      asciiBytes(
+        `5 0 obj\n<< /Type /XObject /Subtype /Image /Width ${imageWidthPx} /Height ${imageHeightPx} ` +
+        `/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpegBytes.length} >>\nstream\n`
+      ),
+      jpegBytes,
+      asciiBytes(`\nendstream\nendobj\n`)
+    ]);
+
+    const header = asciiBytes("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+    const parts = [header];
+    const offsets = [0];
+    let cursor = header.length;
+
+    for (let i = 1; i <= 5; i++) {
+      offsets[i] = cursor;
+      parts.push(objects[i]);
+      cursor += objects[i].length;
+    }
+
+    const xrefOffset = cursor;
+    let xref = "xref\n0 6\n";
+    xref += "0000000000 65535 f \n";
+    for (let i = 1; i <= 5; i++) {
+      xref += String(offsets[i]).padStart(10, "0") + " 00000 n \n";
+    }
+    xref +=
+      `trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+
+    parts.push(asciiBytes(xref));
+    return concatBytes(parts);
+  }
+
+  function wrapCanvasText(ctx, text, maxWidth) {
+    if (!text) return [];
+    // Japanese can wrap at essentially any character. Keep ASCII runs together when possible.
+    const chars = Array.from(text);
+    const lines = [];
+    let line = "";
+
+    for (const ch of chars) {
+      const test = line + ch;
+      if (line && ctx.measureText(test).width > maxWidth) {
+        lines.push(line);
+        line = ch;
+      } else {
+        line = test;
+      }
+    }
+    if (line) lines.push(line);
+    return lines;
+  }
+
+  function drawEnvelopeCanvas() {
+    // 300 dpi gives clean envelope printing while remaining manageable on iPad.
+    const dpi = 300;
+    const pxPerMm = dpi / 25.4;
+    const W = Math.round(235 * pxPerMm);
+    const H = Math.round(120 * pxPerMm);
+
+    const canvas = document.createElement("canvas");
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext("2d", { alpha: false });
+
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#111111";
+    ctx.textBaseline = "top";
+
+    const xOffset = Number(el.offsetX.value);
+    const yOffset = Number(el.offsetY.value);
+    const fsPt = Number(el.fontSize.value);
+
+    // Match the on-screen envelope coordinates.
+    const baseXmm = 92 + xOffset;
+    const baseYmm = 28 + yOffset;
+    const maxWmm = 130;
+
+    const baseX = baseXmm * pxPerMm;
+    let y = baseYmm * pxPerMm;
+    const maxW = maxWmm * pxPerMm;
+
+    const fontFamily = '"Hiragino Sans","Yu Gothic","Noto Sans JP",sans-serif';
+
+    function setFont(pt, weight = 400) {
+      // CSS pt = 1/72 inch
+      const px = pt * dpi / 72;
+      ctx.font = `${weight} ${px}px ${fontFamily}`;
+      return px;
+    }
+
+    function drawLines(text, pt, weight, lineHeightFactor, afterMm) {
+      if (!text) return;
+      const px = setFont(pt, weight);
+      const lh = px * lineHeightFactor;
+      const lines = wrapCanvasText(ctx, text, maxW);
+      for (const line of lines) {
+        ctx.fillText(line, baseX, y);
+        y += lh;
+      }
+      y += afterMm * pxPerMm;
+    }
 
     const postal = normalizePostal(el.postal.value);
     const address = el.address.value.trim();
@@ -382,33 +534,46 @@
     const doctor = el.doctor.value.trim();
     const type = getRecipientType();
 
-    let department = "";
-    let recipient = "";
+    drawLines(postal ? `〒${postal}` : "", fsPt * 0.82, 400, 1.35, 2);
+    drawLines(address, fsPt * 0.88, 400, 1.45, 3);
+    drawLines(hospital, fsPt, 700, 1.55, 1);
 
     if (type === "doctor") {
-      department = dept;
-      recipient = doctor ? `${doctor} 先生　御机下` : "先生　御机下";
+      drawLines(dept, fsPt, 400, 1.55, 1);
+      drawLines(doctor ? `${doctor} 先生　御机下` : "先生　御机下",
+                fsPt, 700, 1.55, 0);
     } else if (type === "department") {
-      recipient = dept ? `${dept} 御中` : "御中";
+      drawLines(dept ? `${dept} 御中` : "御中", fsPt, 700, 1.55, 0);
     } else {
-      recipient = "御中";
+      drawLines("御中", fsPt, 700, 1.55, 0);
     }
 
-    const printData = {
-      postal,
-      address,
-      hospital,
-      department,
-      recipient,
-      x: Number(el.offsetX.value),
-      y: Number(el.offsetY.value),
-      fs: Number(el.fontSize.value)
-    };
+    return canvas;
+  }
 
-    sessionStorage.setItem("hospitalEnvelopePrintData", JSON.stringify(printData));
+  function createEnvelopePdf() {
+    const canvas = drawEnvelopeCanvas();
 
-    // Dedicated print-only page: no form/search UI exists in this document.
-    window.location.href = "print.html";
+    // JPEG is used because it can be embedded into a tiny PDF without any external library.
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.96);
+    const base64 = dataUrl.split(",")[1];
+    const jpegBytes = base64ToBytes(base64);
+    const pdfBytes = makeSinglePagePdfFromJpeg(jpegBytes, canvas.width, canvas.height);
+
+    const blob = new Blob([pdfBytes], { type: "application/pdf" });
+    const url = URL.createObjectURL(blob);
+
+    // Opening the PDF in the same tab is the most reliable behavior on iPad Safari.
+    // The user can then use Share -> Print, and Back returns to the app.
+    window.location.href = url;
+
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }
+
+  el.printBtn.addEventListener("click", () => {
+    updatePreview();
+    if (!validateBeforePrint()) return;
+    createEnvelopePdf();
   });
 
   el.clearBtn.addEventListener("click", clearInputs);
