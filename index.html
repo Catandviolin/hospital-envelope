@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#ffffff">
+  <title>病院宛 封筒印刷</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="app">
+    <header>
+      <h1>病院宛 封筒印刷</h1>
+      <p>病院を検索して、長形3号（235 × 120 mm）の横書き宛名を作成します。</p>
+    </header>
+
+    <section class="card">
+      <h2>1. 病院を検索</h2>
+      <label for="hospitalQuery">病院名</label>
+      <div class="search-row">
+        <input id="hospitalQuery" type="search" autocomplete="off"
+               placeholder="例：岡山大学病院">
+        <button id="searchBtn" type="button">検索</button>
+      </div>
+      <p class="hint">検索は1秒に1回まで。検索結果はこのiPad内に一時保存します。</p>
+      <div id="status" class="status" aria-live="polite"></div>
+      <div id="results" class="results" role="list"></div>
+    </section>
+
+    <section class="card">
+      <h2>2. 宛先を確認・入力</h2>
+
+      <label for="postal">郵便番号</label>
+      <input id="postal" type="text" inputmode="numeric" placeholder="700-8558">
+
+      <label for="address">住所</label>
+      <textarea id="address" rows="2" placeholder="岡山県岡山市北区…"></textarea>
+
+      <label for="hospitalName">病院名</label>
+      <input id="hospitalName" type="text" placeholder="○○病院">
+
+      <label for="department">診療科（任意）</label>
+      <input id="department" type="text" placeholder="循環器内科">
+
+      <label for="doctor">医師名（任意）</label>
+      <input id="doctor" type="text" placeholder="山田 太郎">
+
+      <fieldset>
+        <legend>宛名形式</legend>
+        <label class="radio"><input type="radio" name="recipientType" value="doctor" checked> 先生 御机下</label>
+        <label class="radio"><input type="radio" name="recipientType" value="department"> 診療科 御中</label>
+        <label class="radio"><input type="radio" name="recipientType" value="hospital"> 病院 御中</label>
+      </fieldset>
+    </section>
+
+    <section class="card controls-card">
+      <h2>3. 長3封筒プレビュー</h2>
+      <div class="adjust-grid">
+        <div>
+          <label for="offsetX">左右位置</label>
+          <input id="offsetX" type="range" min="-25" max="25" step="1" value="0">
+          <span id="offsetXValue">0 mm</span>
+        </div>
+        <div>
+          <label for="offsetY">上下位置</label>
+          <input id="offsetY" type="range" min="-20" max="20" step="1" value="0">
+          <span id="offsetYValue">0 mm</span>
+        </div>
+        <div>
+          <label for="fontSize">文字サイズ</label>
+          <input id="fontSize" type="range" min="12" max="24" step="1" value="17">
+          <span id="fontSizeValue">17 pt</span>
+        </div>
+      </div>
+      <p class="hint">プリンターごとのズレは「左右位置」「上下位置」で微調整できます。</p>
+
+      <div class="preview-wrap">
+        <div id="envelope" class="envelope" aria-label="長形3号封筒プレビュー">
+          <div id="printContent" class="print-content">
+            <div id="previewPostal" class="preview-postal"></div>
+            <div id="previewAddress" class="preview-address"></div>
+            <div id="previewHospital" class="preview-hospital"></div>
+            <div id="previewDepartment" class="preview-department"></div>
+            <div id="previewRecipient" class="preview-recipient"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="action-row">
+        <button id="printBtn" type="button" class="primary">印刷</button>
+        <button id="clearBtn" type="button">入力をクリア</button>
+      </div>
+      <p class="print-note">
+        印刷時は、プリンター側でも用紙サイズを「長形3号」または「235 × 120 mm」に設定してください。
+        Safariの印刷設定で拡大・縮小が選べる場合は100%を推奨します。
+      </p>
+    </section>
+
+    <footer>
+      <p>
+        病院検索データ © OpenStreetMap contributors /
+        <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>
+      </p>
+      <p class="small">
+        公開検索サービスのため、検索結果に不足や誤りがある場合があります。
+        郵便番号・住所・病院名は印刷前に必ず確認してください。
+      </p>
+    </footer>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
